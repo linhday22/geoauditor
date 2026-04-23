@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GEO Readiness Auditor — AthenaHQ</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; }
+    .mono { font-family: ui-monospace, 'SF Mono', Monaco, monospace; }
+  </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-900">
+  <div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+// ---------- utility ----------
+const isTrue = (v) => v === true || v === "True" || v === "true" || v === 1;
+const scoreBucket = (s) => {
+  const n = Number(s);
+  if (n >= 50) return { label: "Critical", cls: "bg-red-100 text-red-800 ring-red-600/20" };
+  if (n >= 30) return { label: "High", cls: "bg-orange-100 text-orange-800 ring-orange-600/20" };
+  if (n >= 15) return { label: "Moderate", cls: "bg-yellow-100 text-yellow-800 ring-yellow-600/20" };
+  return { label: "Clean", cls: "bg-emerald-100 text-emerald-800 ring-emerald-600/20" };
+};
+const gapLabel = {
+  schema: "No JSON-LD",
+  decision: "No /vs pages",
+  spa: "JS-rendered",
+  blog: "No /blog",
+  none: "Clean",
+};
+
+// ---------- components ----------
+function StatCard({ label, value, sub }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-5 py-4 shadow-sm">
+      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 text-3xl font-semibold text-slate-900">{value}</div>
+      {sub && <div className="mt-0.5 text-xs text-slate-500">{sub}</div>}
+    </div>
+  );
+}
+
+function ScoreBar({ label, score, max }) {
+  const pct = Math.min(100, (score / max) * 100);
+  const color = score >= max * 0.75 ? "bg-red-500"
+              : score >= max * 0.5  ? "bg-orange-500"
+              : score > 0           ? "bg-yellow-400"
+              :                       "bg-emerald-500";
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-between text-xs">
+        <span className="font-medium text-slate-700">{label}</span>
+        <span className="mono text-slate-500">{score} / {max}</span>
+      </div>
+      <div className="h-2 w-full rounded-full bg-slate-100">
+        <div className={`h-2 rounded-full ${color}`} style={{width: `${pct}%`}}></div>
+      </div>
+    </div>
+  );
+}
+
+function AuditForm({ onSubmit, loading }) {
+  const [company, setCompany] = useState("");
+  const [domain, setDomain] = useState("");
+  const [location, setLocation] = useState("");
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!domain.trim()) return;
+    onSubmit({ company: company.trim(), domain: domain.trim(), location: location.trim() });
+    setCompany(""); setDomain(""); setLocation("");
+  };
+
+  return (
+    <form onSubmit={submit} className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-3 flex items-center gap-2">
+        <div className="h-2 w-2 rounded-full bg-indigo-500"></div>
+        <h2 className="text-sm font-semibold tracking-wide text-slate-900">Audit a company</h2>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_1fr_auto]">
+        <input
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          placeholder="Company name (optional)"
+          value={company} onChange={(e) => setCompany(e.target.value)}
+          disabled={loading}
+        />
+        <input
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          placeholder="domain.com (required)"
+          value={domain} onChange={(e) => setDomain(e.target.value)}
+          disabled={loading} required
+        />
+        <input
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          placeholder="HQ location (optional)"
+          value={location} onChange={(e) => setLocation(e.target.value)}
+          disabled={loading}
+        />
+        <button
+          type="submit" disabled={loading || !domain.trim()}
+          className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {loading ? "Auditing…" : "Run audit"}
+        </button>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">
+        Scrapes the domain for blog crawlability, JSON-LD schema, decision-support
+        pages, and SPA shell detection. Takes ~2-5s per company.
+      </p>
+    </form>
+  );
+}
+
+function FilterBar({ sfOnly, setSfOnly, minScore, setMinScore, gap, setGap, gaps, query, setQuery }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+      <input
+        type="search"
+        placeholder="Search company or domain…"
+        className="flex-1 min-w-[220px] rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        value={query} onChange={(e) => setQuery(e.target.value)}
+      />
+      <label className="flex items-center gap-2 text-sm text-slate-700">
+        <input type="checkbox" checked={sfOnly} onChange={(e) => setSfOnly(e.target.checked)}
+               className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
+        SF only
+      </label>
+      <label className="flex items-center gap-2 text-sm text-slate-700">
+        Min score
+        <input type="range" min="0" max="100" step="5" value={minScore}
+               onChange={(e) => setMinScore(Number(e.target.value))} className="accent-indigo-600" />
+        <span className="mono w-8 text-right text-xs text-slate-500">{minScore}</span>
+      </label>
+      <select
+        value={gap} onChange={(e) => setGap(e.target.value)}
+        className="rounded-md border border-slate-300 px-2 py-1.5 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+      >
+        <option value="all">All gaps</option>
+        {gaps.map(g => <option key={g} value={g}>Top gap: {gapLabel[g] || g}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function CompanyRow({ row, expanded, onToggle }) {
+  const b = scoreBucket(row.total_score);
+  const sf = isTrue(row.is_sf);
+  return (
+    <>
+      <tr className="cursor-pointer border-t border-slate-100 hover:bg-slate-50" onClick={onToggle}>
+        <td className="px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className={`inline-flex h-5 w-5 items-center justify-center rounded text-[10px] font-bold ${sf ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-slate-400"}`}>
+              {sf ? "SF" : "—"}
+            </span>
+            <div>
+              <div className="font-medium text-slate-900">{row.company}</div>
+              <div className="mono text-xs text-slate-500">{row.domain}</div>
+            </div>
+          </div>
+        </td>
+        <td className="px-4 py-3 text-sm text-slate-600">{row.location || "—"}</td>
+        <td className="px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="mono text-lg font-semibold text-slate-900">{row.total_score}</span>
+            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${b.cls}`}>{b.label}</span>
+          </div>
+        </td>
+        <td className="px-4 py-3 text-sm text-slate-700">{gapLabel[row.top_gap] || row.top_gap}</td>
+        <td className="px-4 py-3 text-sm text-slate-600">{row.walking_cluster?.split(":")[0] || "—"}</td>
+        <td className="px-4 py-3 text-slate-400">{expanded ? "▾" : "▸"}</td>
+      </tr>
+      {expanded && (
+        <tr className="border-t border-slate-100 bg-slate-50">
+          <td colSpan="6" className="px-4 py-5">
+            <div className="grid gap-5 lg:grid-cols-[1fr_1.3fr]">
+              <div className="space-y-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Signal breakdown</div>
+                <ScoreBar label="Blog crawlability" score={Number(row.blog_score)} max={30} />
+                <ScoreBar label="JS-rendered (SPA)" score={Number(row.spa_score)} max={25} />
+                <ScoreBar label="Schema markup" score={Number(row.schema_score)} max={25} />
+                <ScoreBar label="Decision-support content" score={Number(row.decision_score)} max={20} />
+                {row.notes && (
+                  <details className="mt-2 text-xs text-slate-600">
+                    <summary className="cursor-pointer font-medium text-slate-700">Raw scraper notes</summary>
+                    <pre className="mono mt-2 whitespace-pre-wrap rounded bg-white p-2 ring-1 ring-slate-200">{row.notes}</pre>
+                  </details>
+                )}
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Outreach hook</div>
+                  <div className="mt-1 rounded-md border border-indigo-200 bg-indigo-50 p-3 text-sm leading-relaxed text-indigo-900">
+                    {row.outreach_hook || <span className="text-slate-400 italic">no hook available</span>}
+                  </div>
+                </div>
+                {row.personalized_poster_note && (
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Poster sticky-note</div>
+                    <div className="mt-1 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-relaxed text-amber-900">
+                      {row.personalized_poster_note}
+                    </div>
+                  </div>
+                )}
+                {(row.hq_neighborhood || row.walking_cluster) && (
+                  <div className="flex gap-4 text-xs text-slate-600">
+                    {row.hq_neighborhood && <div><span className="font-semibold">HQ:</span> {row.hq_neighborhood}</div>}
+                    {row.walking_cluster && <div><span className="font-semibold">Cluster:</span> {row.walking_cluster}</div>}
+                  </div>
+                )}
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function App() {
+  const [audits, setAudits] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [auditing, setAuditing] = useState(false);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+
+  const [sfOnly, setSfOnly] = useState(false);
+  const [minScore, setMinScore] = useState(0);
+  const [gap, setGap] = useState("all");
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/audits");
+      const data = await r.json();
+      setAudits(data);
+    } catch (e) {
+      setError("Failed to load audits: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const runAudit = async (payload) => {
+    setAuditing(true); setError("");
+    try {
+      const r = await fetch("/api/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "audit failed");
+      setAudits(prev => {
+        const filtered = prev.filter(x => x.domain !== data.domain);
+        return [...filtered, data];
+      });
+      setExpanded(data.domain);
+      setToast(`Audited ${data.company} — score ${data.total_score}`);
+      setTimeout(() => setToast(""), 3500);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setAuditing(false);
+    }
+  };
+
+  const gapsPresent = useMemo(() => {
+    const s = new Set(audits.map(r => r.top_gap).filter(Boolean));
+    return Array.from(s);
+  }, [audits]);
+
+  const filtered = useMemo(() => {
+    let rows = [...audits];
+    if (sfOnly) rows = rows.filter(r => isTrue(r.is_sf));
+    rows = rows.filter(r => Number(r.total_score) >= minScore);
+    if (gap !== "all") rows = rows.filter(r => r.top_gap === gap);
+    if (query.trim()) {
+      const q = query.toLowerCase();
+      rows = rows.filter(r => (r.company || "").toLowerCase().includes(q)
+                           || (r.domain  || "").toLowerCase().includes(q));
+    }
+    rows.sort((a, b) => Number(b.total_score) - Number(a.total_score));
+    return rows;
+  }, [audits, sfOnly, minScore, gap, query]);
+
+  const stats = useMemo(() => {
+    const total = audits.length;
+    if (!total) return { total: 0, avg: 0, sf: 0, critical: 0 };
+    const sum = audits.reduce((s, r) => s + Number(r.total_score), 0);
+    return {
+      total,
+      avg: Math.round(sum / total),
+      sf: audits.filter(r => isTrue(r.is_sf)).length,
+      critical: audits.filter(r => Number(r.total_score) >= 40).length,
+    };
+  }, [audits]);
+
+  return (
+    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+      <header className="mb-8 flex items-center justify-between">
+        <div>
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-indigo-600">
+            <div className="h-1.5 w-1.5 rounded-full bg-indigo-600"></div>
+            AthenaHQ
+          </div>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">
+            GEO Readiness Auditor
+          </h1>
+          <p className="mt-1 text-sm text-slate-600">
+            Score B2B sites on how urgently they need Generative Engine Optimization.
+          </p>
+        </div>
+        <button
+          onClick={refresh}
+          className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+        >
+          Refresh
+        </button>
+      </header>
+
+      <section className="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <StatCard label="Companies" value={stats.total} />
+        <StatCard label="Avg score" value={stats.avg} sub="higher = more urgent" />
+        <StatCard label="SF-based" value={stats.sf} sub={`${stats.total ? Math.round(100*stats.sf/stats.total) : 0}% of total`} />
+        <StatCard label="High urgency" value={stats.critical} sub="score ≥ 40" />
+      </section>
+
+      <section className="mb-6">
+        <AuditForm onSubmit={runAudit} loading={auditing} />
+        {error && (
+          <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+            {error}
+          </div>
+        )}
+      </section>
+
+      <section className="mb-4">
+        <FilterBar
+          sfOnly={sfOnly} setSfOnly={setSfOnly}
+          minScore={minScore} setMinScore={setMinScore}
+          gap={gap} setGap={setGap}
+          gaps={gapsPresent}
+          query={query} setQuery={setQuery}
+        />
+      </section>
+
+      <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+          <div className="text-sm font-medium text-slate-700">
+            {filtered.length} {filtered.length === 1 ? "company" : "companies"}
+            {filtered.length !== audits.length && <span className="text-slate-400"> of {audits.length}</span>}
+          </div>
+          <div className="text-xs text-slate-500">Click a row for details</div>
+        </div>
+        {loading ? (
+          <div className="px-4 py-12 text-center text-sm text-slate-500">Loading audits…</div>
+        ) : filtered.length === 0 ? (
+          <div className="px-4 py-12 text-center text-sm text-slate-500">
+            {audits.length === 0 ? "No audits yet — run one above." : "No matches for current filters."}
+          </div>
+        ) : (
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="px-4 py-2.5 font-medium">Company</th>
+                <th className="px-4 py-2.5 font-medium">Location</th>
+                <th className="px-4 py-2.5 font-medium">Score</th>
+                <th className="px-4 py-2.5 font-medium">Top gap</th>
+                <th className="px-4 py-2.5 font-medium">Cluster</th>
+                <th className="px-4 py-2.5"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((row) => (
+                <CompanyRow
+                  key={row.domain}
+                  row={row}
+                  expanded={expanded === row.domain}
+                  onToggle={() => setExpanded(expanded === row.domain ? null : row.domain)}
+                />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <footer className="mt-8 text-center text-xs text-slate-400">
+        Signals: blog crawlability · schema markup · decision-support content · SPA shell detection ·
+        Built on AthenaHQ State of AI Search 2026
+      </footer>
+
+      {toast && (
+        <div className="fixed bottom-6 right-6 rounded-md bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-lg">
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
